@@ -1,0 +1,147 @@
+import dash
+from dash import dcc, html
+from dash.dependencies import Input, Output
+import plotly.graph_objects as go
+import pandas as pd
+
+# Cargar datos
+global_data_url = 'GLB.Ts+dSST.csv'
+northern_data_url = 'NH.Ts+dSST.csv'
+southern_data_url = 'SH.Ts+dSST.csv'
+
+global_data = pd.read_csv(global_data_url, skiprows=1)
+northern_data = pd.read_csv(northern_data_url, skiprows=1)
+southern_data = pd.read_csv(southern_data_url, skiprows=1)
+
+
+columns = ['Year', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'J-D', 'D-N', 'DJF', 'MAM', 'JJA', 'SON']
+global_data.columns = columns
+northern_data.columns = columns
+southern_data.columns = columns
+
+# Convertir los valores de 0.01 grados Celsius a grados Celsius
+def convert_to_celsius(data):
+    for column in data.columns[1:]:  # Omite la columna 'Year'
+        data[column] = pd.to_numeric(data[column], errors='coerce')  # Convertir a numérico, manejando errores
+        data[column] = data[column] * 10
+    return data
+
+global_data = convert_to_celsius(global_data)
+northern_data = convert_to_celsius(northern_data)
+southern_data = convert_to_celsius(southern_data)
+
+# Función para convertir los datos a formato largo
+def melt_data(data, region):
+    monthly_data = data.melt(id_vars=['Year'], value_vars=columns[1:13], 
+                             var_name='Month', value_name='Temperature')
+    monthly_data['Date'] = pd.to_datetime(monthly_data['Year'].astype(str) + monthly_data['Month'], format='%Y%b')
+    monthly_data['Region'] = region
+    
+    annual_data = data[['Year', 'J-D']].copy()
+    annual_data['Date'] = pd.to_datetime(annual_data['Year'].astype(str), format='%Y')
+    annual_data['Month'] = 'J-D'
+    annual_data['Temperature'] = annual_data['J-D']
+    annual_data['Region'] = region
+    annual_data = annual_data.drop(columns=['J-D'])
+    
+    return monthly_data, annual_data
+
+# Convertir cada dataset a formato largo
+global_monthly, global_annual = melt_data(global_data, 'Global')
+northern_monthly, northern_annual = melt_data(northern_data, 'Northern Hemisphere')
+southern_monthly, southern_annual = melt_data(southern_data, 'Southern Hemisphere')
+
+# Unir los datasets
+temperature_data_monthly = pd.concat([global_monthly, northern_monthly, southern_monthly])
+temperature_data_annual = pd.concat([global_annual, northern_annual, southern_annual])
+
+# Eliminar filas con valores faltantes
+temperature_data_monthly = temperature_data_monthly.dropna()
+temperature_data_annual = temperature_data_annual.dropna()
+
+# Establecer el índice de fecha
+temperature_data_monthly.set_index('Date', inplace=True)
+temperature_data_annual.set_index('Date', inplace=True)
+
+# Cargar datos de CO2
+co2_data = pd.read_csv('CO2.txt', delim_whitespace=True, comment='#', header=None, 
+                       names=['Year', 'Month', 'DecimalDate', 'CO2', 'Deseasonalized', 'Days', 'StDev', 'Unc'])
+co2_data['Date'] = pd.to_datetime(co2_data['Year'].astype(int).astype(str) + '-' + co2_data['Month'].astype(int).astype(str), format='%Y-%m')
+co2_data = co2_data[['Date', 'Year', 'CO2']]
+
+# Calcular la media anual de CO2
+co2_annual = co2_data.groupby('Year').mean().reset_index()
+co2_annual['Date'] = pd.to_datetime(co2_annual['Year'].astype(int).astype(str), format='%Y')
+
+# Crear la aplicación Dash
+app = dash.Dash(__name__)
+
+# Layout de la aplicación
+app.layout = html.Div([
+    html.H1('Impacto del Cambio Climático en las Temperaturas Globales'),
+    dcc.Graph(id='line-chart'),
+    html.Label('Seleccione el tipo de datos:'),
+    dcc.Dropdown(
+        id='data-type-dropdown',
+        options=[
+            {'label': 'Mensual', 'value': 'monthly'},
+            {'label': 'Anual', 'value': 'annual'}
+        ],
+        value='monthly'
+    ),
+    dcc.RangeSlider(
+        id='year-slider',
+        min=temperature_data_monthly.index.year.min(),
+        max=temperature_data_monthly.index.year.max(),
+        value=[temperature_data_monthly.index.year.min(), temperature_data_monthly.index.year.max()],
+        marks={str(year): str(year) for year in temperature_data_monthly.index.year.unique()},
+        step=None
+    )
+])
+
+# Callback para actualizar el gráfico de líneas
+@app.callback(
+    Output('line-chart', 'figure'),
+    [Input('year-slider', 'value'),
+    Input('data-type-dropdown', 'value')]
+)
+def update_line_chart(selected_years, data_type):
+    start_year, end_year = selected_years
+    if data_type == 'monthly':
+        filtered_data = temperature_data_monthly[(temperature_data_monthly.index.year >= start_year) & (temperature_data_monthly.index.year <= end_year)]
+        filtered_co2 = co2_data[(co2_data['Date'].dt.year >= start_year) & (co2_data['Date'].dt.year <= end_year)]
+        x_data = filtered_data.index
+        co2_x_data = filtered_co2['Date']
+        co2_y_data = filtered_co2['CO2']
+    else:
+        filtered_data = temperature_data_annual[(temperature_data_annual.index.year >= start_year) & (temperature_data_annual.index.year <= end_year)]
+        filtered_co2 = co2_annual[(co2_annual['Year'] >= start_year) & (co2_annual['Year'] <= end_year)]
+        x_data = filtered_data.index.year
+        co2_x_data = filtered_co2['Year']
+        co2_y_data = filtered_co2['CO2']
+    
+    fig = go.Figure()
+    
+    for region in filtered_data['Region'].unique():
+        regional_data = filtered_data[filtered_data['Region'] == region]
+        fig.add_trace(go.Scatter(x=x_data, y=regional_data['Temperature'],
+                                mode='lines',
+                                name=f'Temperatura Media ({region})'))
+    
+    fig.add_trace(go.Scatter(x=co2_x_data, y=co2_y_data,
+                            mode='lines',
+                            name='CO2 (ppm)',
+                            line=dict(color='green'),
+                            yaxis='y2'))
+    
+    fig.update_layout(
+        title='Temperaturas Globales y CO2 (1880-Presente)',
+        xaxis_title='Fecha' if data_type == 'monthly' else 'Año',
+        yaxis=dict(title='Temperatura Media (°C)'),
+        yaxis2=dict(title='CO2 (ppm)', overlaying='y', side='right')
+    )
+    
+    return fig
+
+# Ejecutar la aplicación en modo inline en el notebook
+app.run(jupyter_mode="inline", port=8057)
